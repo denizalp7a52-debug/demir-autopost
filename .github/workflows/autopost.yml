@@ -1,19 +1,23 @@
 name: Otomatik paylaşım
 
+# GitHub'ın zamanlayıcısı yeni depolarda saatlerce gecikebiliyor.
+# Bu yüzden "keep" modu ~5,5 saat açık kalıp her 5 dakikada bir zamanı gelenleri paylaşır,
+# bitmeden önce kendini yeniden başlatır. Zamanlayıcı yalnızca zincir koparsa yedektir.
 on:
   schedule:
-    - cron: "*/20 * * * *"        # her 20 dakikada bir zamanı gelenleri kontrol et
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       command:
-        description: "run | check | status | post"
-        default: "check"
+        description: "keep | run | check | status | post"
+        default: "keep"
       item_id:
         description: "post komutu için paylaşım kimliği (örn. day01-post)"
         default: ""
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: autopost
@@ -22,30 +26,47 @@ concurrency:
 jobs:
   post:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      IG_USER_ID: ${{ secrets.IG_USER_ID }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      TIKTOK_ENABLED: ${{ vars.TIKTOK_ENABLED }}
+      TIKTOK_PRIVACY: ${{ vars.TIKTOK_PRIVACY }}
+      TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+      TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+      TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+      MEDIA_BASE_URL: ${{ vars.MEDIA_BASE_URL }}
+      DRY_RUN: ${{ vars.DRY_RUN }}
+      GH_TOKEN: ${{ github.token }}
+      CMD: ${{ github.event.inputs.command || 'keep' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Paylaş
-        env:
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          IG_USER_ID: ${{ secrets.IG_USER_ID }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          TIKTOK_ENABLED: ${{ vars.TIKTOK_ENABLED }}
-          TIKTOK_PRIVACY: ${{ vars.TIKTOK_PRIVACY }}
-          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
-          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
-          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
-          MEDIA_BASE_URL: ${{ vars.MEDIA_BASE_URL }}
-          DRY_RUN: ${{ vars.DRY_RUN }}
-        run: |
-          cp media/schedule.json schedule.json 2>/dev/null || true
-          python scripts/autopost.py ${{ github.event.inputs.command || 'run' }} ${{ github.event.inputs.item_id }}
-      - name: Kayıtları kaydet
-        if: always()
         run: |
           git config user.name "demir-bot"
           git config user.email "bot@demirzeytincilik.com"
-          git add posted.json
-          git diff --cached --quiet || (git commit -m "Paylaşım kaydı güncellendi" && git push)
+          save() {
+            git add posted.json
+            git diff --cached --quiet || { git commit -q -m "Paylaşım kaydı güncellendi"; git pull -q --rebase && git push -q; }
+          }
+          cp media/schedule.json schedule.json 2>/dev/null || true
+          if [ "$CMD" != "keep" ]; then
+            python scripts/autopost.py $CMD ${{ github.event.inputs.item_id }}; save; exit 0
+          fi
+          end=$(( $(date +%s) + 330*60 ))
+          while [ $(date +%s) -lt $end ]; do
+            git pull -q --rebase || true
+            cp media/schedule.json schedule.json 2>/dev/null || true
+            python scripts/autopost.py run || echo "::warning::paylaşım denemesi başarısız, 5 dk sonra tekrar"
+            save || true
+            sleep 300
+          done
+      - name: Zinciri sürdür
+        if: always() && env.CMD == 'keep'
+        run: |
+          waiting=$(gh run list --workflow autopost.yml --status queued --json databaseId --jq length)
+          if [ "$waiting" = "0" ]; then gh workflow run autopost.yml -f command=keep; fi
